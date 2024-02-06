@@ -1,26 +1,22 @@
-import click
-import time
+import argparse
 import json
 import os
 import tempfile
+import time
 from typing import Dict
 
 import numpy as np
-from torchvision import transforms
-from torchvision.models import resnet18
+import ray
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
-import ray
 from ray import train
+from ray.runtime_env import RuntimeEnv
 from ray.train import Checkpoint, RunConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
-
 from ray.util.spark import setup_ray_cluster, shutdown_ray_cluster
-import ray
-
-from ray.runtime_env import RuntimeEnv
+from torchvision import transforms
+from torchvision.models import resnet18
 
 
 def add_fake_labels(batch: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -30,7 +26,7 @@ def add_fake_labels(batch: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
 
 
 def transform_image(
-    batch: Dict[str, np.ndarray], transform: torch.nn.Module
+        batch: Dict[str, np.ndarray], transform: torch.nn.Module
 ) -> Dict[str, np.ndarray]:
     transformed_tensors = [transform(image).numpy() for image in batch["image"]]
     batch["image"] = transformed_tensors
@@ -48,7 +44,7 @@ def train_loop_per_worker(config):
     for epoch in range(config["num_epochs"]):
         running_loss = 0.0
         for i, data in enumerate(
-            train_dataset_shard.iter_torch_batches(batch_size=config["batch_size"])
+                train_dataset_shard.iter_torch_batches(batch_size=config["batch_size"])
         ):
             # get the inputs; data is a list of [inputs, labels]
             inputs = data["image"].to(device=train.torch.get_device())
@@ -76,11 +72,6 @@ def train_loop_per_worker(config):
             )
 
 
-@click.command(help="Run Batch prediction on Pytorch ResNet models.")
-@click.option("--data-size-gb", type=int, default=1)
-@click.option("--num-epochs", type=int, default=2)
-@click.option("--num-workers", type=int, default=1)
-@click.option("--smoke-test", is_flag=True, default=False)
 def main(data_size_gb: int, num_epochs=2, num_workers=1, smoke_test: bool = False):
     data_url = (
         f"s3://anonymous@air-example-data-2/{data_size_gb}G-image-data-synthetic-raw"
@@ -151,22 +142,54 @@ def main(data_size_gb: int, num_epochs=2, num_workers=1, smoke_test: bool = Fals
 
 
 if __name__ == "__main__":
-        restart = True
-        if restart is True:
-            if ray.is_initialized():
-                shutdown_ray_cluster()
-                ray.shutdown()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--restart", action="store_true", default=True)
+    parser.add_argument("--max-worker-nodes", type=int, default=1)
+    parser.add_argument("--min-worker-nodes", type=int, default=1)
+    parser.add_argument("--num-cpus-per-node", type=int, default=8)
+    parser.add_argument("--num-gpus-per-node", type=int, default=0)
+    parser.add_argument("--log-path", type=str, default="/dbfs/soffer/ray_logs")
+    parser.add_argument("--data-size-gb", type=int, default=1)
+    parser.add_argument("--num-epochs", type=int, default=2)
+    parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--smoke-test", action="store_true", default=False)
+    args = parser.parse_args()
 
-        if not ray.is_initialized():
-            setup_ray_cluster(
-                max_worker_nodes=max_worker_nodes,
-                min_worker_nodes=min_worker_nodes,
-                num_cpus_per_node=num_cpus_per_node,
-                num_gpus_per_node=num_gpus_per_node,
-                collect_log_to_path=log_path
-            )
-            runtime_env = {"env_vars": {"GLOO_SOCKET_IFNAME": "eth0"}}
-            ray.init(ignore_reinit_error=True, runtime_env=RuntimeEnv(env_vars=runtime_env['env_vars']))
+    data_size_gb = args.data_size_gb
+    num_epochs = args.num_epochs
+    num_workers = args.num_workers
+    smoke_test = args.smoke_test
+    restart = args.restart
+    max_worker_nodes = args.max_worker_nodes
+    min_worker_nodes = args.min_worker_nodes
+    num_cpus_per_node = args.num_cpus_per_node
+    num_gpus_per_node = args.num_gpus_per_node
+    log_path = args.log_path
 
-        print(ray.cluster_resources())
-    main()
+    if restart is True:
+        if ray.is_initialized():
+            shutdown_ray_cluster()
+            ray.shutdown()
+
+    if not ray.is_initialized():
+        setup_ray_cluster(
+            max_worker_nodes=max_worker_nodes,
+            min_worker_nodes=min_worker_nodes,
+            num_cpus_per_node=num_cpus_per_node,
+            num_gpus_per_node=num_gpus_per_node,
+            collect_log_to_path=log_path
+        )
+        runtime_env = {"env_vars": {"GLOO_SOCKET_IFNAME": "eth0"}}
+        ray.init(ignore_reinit_error=True, runtime_env=RuntimeEnv(env_vars=runtime_env['env_vars']))
+
+    print(ray.cluster_resources())
+
+    start_time = time.time()
+
+    main(data_size_gb=data_size_gb,
+         num_epochs=num_epochs,
+         num_workers=num_workers,
+         smoke_test=smoke_test)
+
+    elapsed_time = time.time() - start_time
+    print(f"Elapsed time: {elapsed_time} seconds")
